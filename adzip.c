@@ -4,6 +4,43 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+// Helper function, especially for creating an archive. If a file of the same archive already exists, then it will generate a new name by appending a number to it.
+void generateUniqueFilename(char **archiveFile)
+{
+    struct stat buffer;
+    int exists = stat(*archiveFile, &buffer);
+
+    // If the file exists, then it will make the new name otherwise it won't
+    if (exists == 0)
+    {
+        int count = 1;
+        size_t len = strlen(*archiveFile);
+
+        // Making some space for the number and potential extension change
+        char *newName = malloc(len + 10);
+        if (newName == NULL)
+        {
+            perror("Memory allocation failed");
+            exit(EXIT_FAILURE);
+        }
+
+        // While there is a file duplicate that exists, we will increase count till it doesn't exist)
+        do
+        {
+            // Removing last 3 characters of old name (removing ".ad" since it would already be there)
+            // Appending the 'count' to the end of the name then adding the extension
+            sprintf(newName, "%.*s%d.ad", (int)(len - 3), *archiveFile, count);
+
+            // Checking if this new name exists as well
+            exists = stat(newName, &buffer);
+            count++;
+        } while (exists == 0);
+
+        free(*archiveFile);
+        *archiveFile = newName;
+    }
+}
+
 // This function is for parsing the arguments into the corresponding variables and to account for invalid checks
 void ParseArguments(int argc, char **argv, char **flag, char **archiveFile, char **file_directory) 
 {
@@ -44,6 +81,9 @@ void ParseArguments(int argc, char **argv, char **flag, char **archiveFile, char
         strcat(newName, extension);
         *archiveFile = newName; // Update archiveFile to point to the new name with .ad
     }
+
+    // Passes it through to generate a unique file name in case of duplicates
+    generateUniqueFilename(archiveFile);
 }
 
 // Helper function for createArchive() to recursively go through each file in the directory and archive it into the output file passed
