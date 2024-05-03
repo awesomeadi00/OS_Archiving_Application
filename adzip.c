@@ -5,7 +5,7 @@
 #include <sys/stat.h>
 
 // This function is for parsing the arguments into the corresponding variables and to account for invalid checks
-void ParseArguments(int argc, char **argv, char **flag, char **archiveFlag, char **file_directory) 
+void ParseArguments(int argc, char **argv, char **flag, char **archiveFile, char **file_directory) 
 {
     // If the number of arguments is not the expected amount
     if (argc != 4) {
@@ -23,8 +23,27 @@ void ParseArguments(int argc, char **argv, char **flag, char **archiveFlag, char
     }
 
     *flag = argv[1];
-    *archiveFlag = argv[2];
+    *archiveFile = argv[2];
     *file_directory = argv[3];
+
+    // Ensure the archive file has the .ad extension
+    const char *extension = ".ad";
+    int len = strlen(*archiveFile);
+    int ext_len = strlen(extension);
+
+    // If the archive file name doesn't end with .ad, append .ad to the filename
+    if (len > ext_len && strcmp(*archiveFile + len - ext_len, extension) != 0)
+    {
+        char *newName = malloc(len + ext_len + 1); 
+        if (newName == NULL)
+        {
+            perror("Memory allocation failed");
+            exit(EXIT_FAILURE);
+        }
+        strcpy(newName, *archiveFile);
+        strcat(newName, extension);
+        *archiveFile = newName; // Update archiveFile to point to the new name with .ad
+    }
 }
 
 // Helper function for createArchive() to recursively go through each file in the directory and archive it into the output file passed
