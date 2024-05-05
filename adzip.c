@@ -138,7 +138,7 @@ void writeDirectorytoArchive(FILE *outfile, const char *path, long *metaDataOffs
     if (!dir)
     {
         perror("Failed to open directory");
-        return;
+        exit(EXIT_FAILURE);
     }
 
     // Write metadata for the directory itself 
@@ -223,8 +223,52 @@ void createArchive(const char *archiveFile, const char *fileOrDirectory)
 }
 
 //================================================================ APPENDING ================================================================================
+void appendToArchive(const char *archiveFile, const char *fileOrDirectory)
+{
+    // Check if the archive file exists
+    struct stat sb;
+    if (stat(archiveFile, &sb) != 0)
+    {
+        fprintf(stderr, "Error: Archive file does not exist.\n");
+        exit(EXIT_FAILURE);
+    }
 
+    // Open the archive file for updating (reading and writing)
+    FILE *outfile = fopen(archiveFile, "rb+");
+    if (!outfile)
+    {
+        perror("Failed to open archive file");
+        exit(EXIT_FAILURE);
+    }
 
+    // Read the metadata offset from the beginning of the file
+    long metaDataOffset;
+    fseek(outfile, 0, SEEK_SET);
+    fread(&metaDataOffset, sizeof(metaDataOffset), 1, outfile);
+
+    // Move to the start of the metadata to append after the last data block
+    fseek(outfile, metaDataOffset, SEEK_SET);
+
+    // Function to write new data and update metadata offset
+    struct stat path_stat;
+    stat(fileOrDirectory, &path_stat);
+    if (S_ISDIR(path_stat.st_mode))
+    {
+        writeDirectorytoArchive(outfile, fileOrDirectory, &metaDataOffset);
+    }
+    else
+    {
+        writeFileToArchive(outfile, fileOrDirectory, &metaDataOffset);
+    }
+
+    // Update the metadata offset at the start of the file
+    fseek(outfile, 0, SEEK_SET);
+    fwrite(&metaDataOffset, sizeof(metaDataOffset), 1, outfile);
+
+    fclose(outfile);
+}
+
+//================================================================ MAIN ================================================================================
 // Main Function
 int main(int argc, char *argv[]) 
 {
