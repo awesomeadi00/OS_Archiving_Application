@@ -15,7 +15,7 @@ typedef struct
 } ArchiveMeta;
 
 // Helper function, especially for creating an archive. If a file of the same archive already exists, then it will generate a new name by appending a number to it.
-void generateUniqueFilename(char **archiveFile)
+void GenerateUniqueFilename(char **archiveFile)
 {
     struct stat buffer;
     int exists = stat(*archiveFile, &buffer);
@@ -94,14 +94,14 @@ void ParseArguments(int argc, char **argv, char **flag, char **archiveFile, char
     }
 
     // Passes it through to generate a unique file name in case of duplicates ONLY if it's creation of archives
-    if(strcmp(flag, "-c") == 0) {
-        generateUniqueFilename(archiveFile);
+    if(strcmp(*flag, "-c") == 0) {
+        GenerateUniqueFilename(archiveFile);
     }
 }
 
 //================================================================ CREATION ================================================================================
 // Helper function that archives a file into the archive file
-void writeFileToArchive(FILE *outfile, const char *filePath, long *metaDataOffset)
+void WriteFileToArchive(FILE *outfile, const char *filePath, long *metaDataOffset)
 {
     struct stat statbuf;
     stat(filePath, &statbuf);
@@ -127,11 +127,13 @@ void writeFileToArchive(FILE *outfile, const char *filePath, long *metaDataOffse
     fwrite(&meta, sizeof(meta), 1, outfile);
 
     // Update metadata offset value (keeps track of where the offset is)
-    *metaDataOffset = ftell(outfile); 
+    *metaDataOffset = ftell(outfile);
+    printf("File written with metadata: Path = %s, Offset = %ld, Size = %d\n", meta.name, meta.offset, meta.size);
+    printf("Metadataoffset value: %ld\n\n", *metaDataOffset);
 }
 
 // Helper function for createArchive() to recursively go through each file in the directory and archive it into the output file passed
-void writeDirectorytoArchive(FILE *outfile, const char *path, long *metaDataOffset)
+void WriteDirectoryToArchive(FILE *outfile, const char *path, long *metaDataOffset)
 {
     // Open the directory
     DIR *dir = opendir(path);
@@ -152,6 +154,8 @@ void writeDirectorytoArchive(FILE *outfile, const char *path, long *metaDataOffs
         fseek(outfile, 0, SEEK_END);
         fwrite(&meta, sizeof(meta), 1, outfile);
         *metaDataOffset = ftell(outfile);
+        printf("Directory written with metadata: Path = %s, Offset = %ld, Size = %d\n", meta.name, meta.offset, meta.size);
+        printf("Metadataoffset value: %ld\n\n", *metaDataOffset);
     }
 
     // While there are still entries in the directory, keep reading
@@ -172,20 +176,20 @@ void writeDirectorytoArchive(FILE *outfile, const char *path, long *metaDataOffs
         // If the entity is a directory once more, we recurse
         if (S_ISDIR(statbuf.st_mode))
         {
-            writeDirectorytoArchive(outfile, fullPath, metaDataOffset);
+            WriteDirectoryToArchive(outfile, fullPath, metaDataOffset);
         }
 
         // Otherwise it is a file: 
         else
         {
-            writeFiletoArchive(outfile, fullPath, metaDataOffset);
+            WriteFileToArchive(outfile, fullPath, metaDataOffset);
         }
     }
     closedir(dir);
 }
 
 // This function is invoked when the "-c" flag is executed on the command line to create an archive and store all the files/directories in it.
-void createArchive(const char *archiveFile, const char *fileOrDirectory)
+void CreateArchive(const char *archiveFile, const char *fileOrDirectory)
 {
     // Creating an archive file in write mode (binary) for writing data onto it
     FILE *outfile = fopen(archiveFile, "wb");
@@ -196,8 +200,9 @@ void createArchive(const char *archiveFile, const char *fileOrDirectory)
     }
 
     // Initializing an initial offset between data and the metadata in the archive file (will be overwritten later when files are actually written)
-    long metaDataOffset = sizeof(long);                          
-    fwrite(&metaDataOffset, sizeof(metaDataOffset), 1, outfile); 
+    long metaDataOffset = sizeof(long);
+    fwrite(&metaDataOffset, sizeof(metaDataOffset), 1, outfile);
+    printf("Metadataoffset initial value: %ld\n\n", metaDataOffset);
 
     // Getting the entities information and reading if it's a directory or a regular file
     struct stat path_stat;
@@ -206,24 +211,25 @@ void createArchive(const char *archiveFile, const char *fileOrDirectory)
     // If it's a directory, then we handle recursively:
     if (S_ISDIR(path_stat.st_mode))
     {
-        writeDirectoryToArchive(outfile, fileOrDirectory, &metaDataOffset);
+        WriteDirectoryToArchive(outfile, fileOrDirectory, &metaDataOffset);
     }
 
     // Otherwise it's a file and we can handle it directly
     else
     {
-        writeFileToArchive(outfile, fileOrDirectory, &metaDataOffset);
+        WriteFileToArchive(outfile, fileOrDirectory, &metaDataOffset);
     }
 
     // Go back to the beginning inital bytes created at the beginning of the file and write the metadata offset there. 
     fseek(outfile, 0, SEEK_SET);
     fwrite(&metaDataOffset, sizeof(metaDataOffset), 1, outfile);
+    printf("Metadataoffset final value: %ld\n",metaDataOffset);
 
     fclose(outfile);
 }
 
 //================================================================ APPENDING ================================================================================
-void appendToArchive(const char *archiveFile, const char *fileOrDirectory)
+void AppendToArchive(const char *archiveFile, const char *fileOrDirectory)
 {
     // Check if the archive file exists
     struct stat sb;
@@ -254,11 +260,11 @@ void appendToArchive(const char *archiveFile, const char *fileOrDirectory)
     stat(fileOrDirectory, &path_stat);
     if (S_ISDIR(path_stat.st_mode))
     {
-        writeDirectorytoArchive(outfile, fileOrDirectory, &metaDataOffset);
+        WriteDirectoryToArchive(outfile, fileOrDirectory, &metaDataOffset);
     }
     else
     {
-        writeFileToArchive(outfile, fileOrDirectory, &metaDataOffset);
+        WriteFileToArchive(outfile, fileOrDirectory, &metaDataOffset);
     }
 
     // Update the metadata offset at the start of the file
@@ -268,6 +274,7 @@ void appendToArchive(const char *archiveFile, const char *fileOrDirectory)
     fclose(outfile);
 }
 
+
 //================================================================ MAIN ================================================================================
 // Main Function
 int main(int argc, char *argv[]) 
@@ -275,20 +282,16 @@ int main(int argc, char *argv[])
     char *flag = NULL, *archiveFile = NULL, *file_directory = NULL;
     ParseArguments(argc, argv, &flag, &archiveFile, &file_directory);
 
-    printf("Flag: %s\n", flag);
-    printf("Archive File: %s\n", archiveFile);
-    printf("File/Directory: %s\n", file_directory);
-
     // If the flag is "-c" for create
     if(strcmp(flag, "-c") == 0) {
-        createArchive(archiveFile, file_directory);
+        CreateArchive(archiveFile, file_directory);
         printf("Successfully created Archive File with this File/Directory!\n");
     }
 
     // Else if the flag is "-a" for append
     else if (strcmp(flag, "-a") == 0)
     {
-        appendToArchive(archiveFile, file_directory);
+        AppendToArchive(archiveFile, file_directory);
         printf("Successfully appended to the Archive File!\n");
     }
 
@@ -309,6 +312,6 @@ int main(int argc, char *argv[])
     {
 
     }
-
+    
     return (EXIT_SUCCESS);
 }
