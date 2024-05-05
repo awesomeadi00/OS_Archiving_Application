@@ -3,6 +3,7 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 // Helper function, especially for creating an archive. If a file of the same archive already exists, then it will generate a new name by appending a number to it.
 void generateUniqueFilename(char **archiveFile)
@@ -82,10 +83,13 @@ void ParseArguments(int argc, char **argv, char **flag, char **archiveFile, char
         *archiveFile = newName; // Update archiveFile to point to the new name with .ad
     }
 
-    // Passes it through to generate a unique file name in case of duplicates
-    generateUniqueFilename(archiveFile);
+    // Passes it through to generate a unique file name in case of duplicates ONLY if it's creation of archives
+    if(strcmp(flag, "-c") == 0) {
+        generateUniqueFilename(archiveFile);
+    }
 }
 
+//================================================================ CREATION ================================================================================
 // Helper function for createArchive() to recursively go through each file in the directory and archive it into the output file passed
 void archiveDirectory(FILE *outfile, const char *path)
 {
@@ -94,7 +98,7 @@ void archiveDirectory(FILE *outfile, const char *path)
     if (dir == NULL)
     {
         perror("Failed to open directory");
-        return;
+        exit(EXIT_FAILURE);
     }
 
     // Iterates over each entry of the directory table
@@ -149,7 +153,7 @@ void createArchive(const char *archiveFile, const char *fileOrDirectory)
     if (outfile == NULL)
     {
         perror("Failed to create archive file");
-        return;
+        exit(EXIT_FAILURE);
     }
 
     // This structure is used to get information about the file/directory
@@ -170,7 +174,7 @@ void createArchive(const char *archiveFile, const char *fileOrDirectory)
         {
             printf("Could not open %s for reading\n", fileOrDirectory);
             fclose(outfile);
-            return;
+            exit(EXIT_FAILURE);
         }
 
         char buffer[1024];
@@ -187,30 +191,41 @@ void createArchive(const char *archiveFile, const char *fileOrDirectory)
     fclose(outfile);
 }
 
+//================================================================ APPENDING ================================================================================
 // Helper function for appendToArchive() for directories to recursively append each file in it to the archive file
 void archiveDirectoryAppend(FILE *outfile, const char *path)
 {
+    // Opens up the directory 
     DIR *dir = opendir(path);
     if (dir == NULL)
     {
         perror("Failed to open directory");
-        return;
+        exit(EXIT_FAILURE);
     }
 
+    // While there are still entries in the directory we keep recursively reading
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL)
     {
+        // Skip the first two entries of the directory table '.' and '..' 
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue; // Skip the '.' and '..' entries
+            continue; 
 
+
+        // Append the fullpath to each entry name
         char fullpath[1024];
         snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+        
+        // If the entry is a directory then we recurse
         struct stat entry_stat;
         stat(fullpath, &entry_stat);
+
         if (S_ISDIR(entry_stat.st_mode))
         {
             archiveDirectoryAppend(outfile, fullpath);
         }
+
+        // Otherwise we open the file and write the file path and read the data onto the outfile
         else
         {
             FILE *infile = fopen(fullpath, "rb");
@@ -219,9 +234,11 @@ void archiveDirectoryAppend(FILE *outfile, const char *path)
                 printf("Could not open %s for reading\n", fullpath);
                 continue;
             }
+
             fprintf(outfile, "%s\n", fullpath); // Write the file path and a newline
             char buffer[1024];
             size_t bytes;
+
             while ((bytes = fread(buffer, 1, sizeof(buffer), infile)) > 0)
             {
                 fwrite(buffer, 1, bytes, outfile);
@@ -235,19 +252,41 @@ void archiveDirectoryAppend(FILE *outfile, const char *path)
 // This function is invoked when the "-a" flag is executed on the command line to append files and directories to the archive file
 void appendToArchive(const char *archiveFile, const char *fileOrDirectory)
 {
-    FILE *outfile = fopen(archiveFile, "ab"); // Open file in append mode
+    // First, we check if the archive file exists
+    struct stat buffer;
+    if (stat(archiveFile, &buffer) != 0)
+    {
+        if (errno == ENOENT)
+        {
+            // The archive file does not exist
+            printf("Error: Archive file does not exist. Cannot append to a non-existing archive.\n");
+            exit(EXIT_FAILURE);
+        }
+        else
+        {
+            // Other errors such as permissions issues
+            perror("Failed to access archive file");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // We open the archive file in 'append' mode
+    FILE *outfile = fopen(archiveFile, "ab"); 
     if (outfile == NULL)
     {
         perror("Failed to open archive file for appending");
-        return;
+        exit(EXIT_FAILURE);
     }
 
+    // We check if it's a directory, then we pass it to the archive directory function
     struct stat path_stat;
     stat(fileOrDirectory, &path_stat);
     if (S_ISDIR(path_stat.st_mode))
     {
         archiveDirectoryAppend(outfile, fileOrDirectory);
     }
+
+    // Otherwise we simply open the file and write it's path and data onto the archive file. 
     else
     {
         FILE *infile = fopen(fileOrDirectory, "rb");
@@ -255,8 +294,9 @@ void appendToArchive(const char *archiveFile, const char *fileOrDirectory)
         {
             printf("Could not open %s for reading\n", fileOrDirectory);
             fclose(outfile);
-            return;
+            exit(EXIT_FAILURE);
         }
+
         fprintf(outfile, "%s\n", fileOrDirectory);
         char buffer[1024];
         size_t bytes;
@@ -289,8 +329,8 @@ int main(int argc, char *argv[])
     // Else if the flag is "-a" for append
     else if (strcmp(flag, "-a") == 0)
     {
-        createArchive(archiveFile, file_directory);
-        printf("Successfully created Archive File with this File/Directory!\n");
+        appendToArchive(archiveFile, file_directory);
+        printf("Successfully appended to the Archive File!\n");
     }
 
     // Else if the flag is "-x" for extract
