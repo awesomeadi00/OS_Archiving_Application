@@ -5,6 +5,15 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+// Structure design for the archive file
+typedef struct
+{
+    long offset;            // Offset where the file's data begins in the archive
+    int size;               // Size of the file data
+    char type;              // 'F' for file, 'D' for directory
+    char name[256];         // File or directory name
+} ArchiveMeta;
+
 // Helper function, especially for creating an archive. If a file of the same archive already exists, then it will generate a new name by appending a number to it.
 void generateUniqueFilename(char **archiveFile)
 {
@@ -22,6 +31,7 @@ void generateUniqueFilename(char **archiveFile)
         if (newName == NULL)
         {
             perror("Memory allocation failed");
+            free(*archiveFile);
             exit(EXIT_FAILURE);
         }
 
@@ -90,56 +100,85 @@ void ParseArguments(int argc, char **argv, char **flag, char **archiveFile, char
 }
 
 //================================================================ CREATION ================================================================================
-// Helper function for createArchive() to recursively go through each file in the directory and archive it into the output file passed
-void archiveDirectory(FILE *outfile, const char *path)
+// Helper function that archives a file into the archive file
+void writeFileToArchive(FILE *outfile, const char *filePath, long *metaDataOffset)
 {
-    // Opens the directory specified by "path" which is the filesOrDirectory
+    struct stat statbuf;
+    stat(filePath, &statbuf);
+
+    // Record all of the file's metadata into the structure
+    ArchiveMeta meta = {.offset = ftell(outfile), .size = statbuf.st_size, .type = 'F'};
+    strcpy(meta.name, filePath); 
+
+    // Open the file for reading
+    FILE *infile = fopen(filePath, "rb");
+    char buffer[1024];
+    size_t bytes;
+
+    // Read the files data and write it onto the archive file
+    while ((bytes = fread(buffer, 1, sizeof(buffer), infile)) > 0)
+    {
+        fwrite(buffer, 1, bytes, outfile);
+    }
+    fclose(infile);
+
+    // Record metadata at the end of the file
+    fseek(outfile, 0, SEEK_END);
+    fwrite(&meta, sizeof(meta), 1, outfile);
+
+    // Update metadata offset value (keeps track of where the offset is)
+    *metaDataOffset = ftell(outfile); 
+}
+
+// Helper function for createArchive() to recursively go through each file in the directory and archive it into the output file passed
+void writeDirectorytoArchive(FILE *outfile, const char *path, long *metaDataOffset)
+{
+    // Open the directory
     DIR *dir = opendir(path);
-    if (dir == NULL)
+    if (!dir)
     {
         perror("Failed to open directory");
-        exit(EXIT_FAILURE);
+        return;
     }
 
-    // Iterates over each entry of the directory table
+    // Write metadata for the directory itself 
+    struct stat statbuf;
+    if (stat(path, &statbuf) != -1)
+    {
+        ArchiveMeta meta = {.offset = -1, .size = 0, .type = 'D'};
+        strncpy(meta.name, path, sizeof(meta.name) - 1);
+        meta.name[sizeof(meta.name) - 1] = '\0';
+
+        fseek(outfile, 0, SEEK_END);
+        fwrite(&meta, sizeof(meta), 1, outfile);
+        *metaDataOffset = ftell(outfile);
+    }
+
+    // While there are still entries in the directory, keep reading
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL)
     {
-        // Skip the '.' and '..' entries (first two which are cd and parent)
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+        // The the entries are the first two in the directory table '.' and '..', skip them. 
+        if (entry->d_name[0] == '.')
             continue; 
 
-        // Constructs the fullpath of file/directory in directory (path + entryname)
-        char fullpath[1024];
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
+        // Append the directory to each entity inside the directory which will be the full path
+        char fullPath[1024];
+        snprintf(fullPath, sizeof(fullPath), "%s/%s", path, entry->d_name);
 
-        // Once again, receiving information about the file/directory 
-        struct stat entry_stat;
-        stat(fullpath, &entry_stat);
+        if (stat(fullPath, &statbuf) == -1)
+            continue;
 
-        // If it is a directory, it will recursively call this function once more and repeat. 
-        if (S_ISDIR(entry_stat.st_mode))
+        // If the entity is a directory once more, we recurse
+        if (S_ISDIR(statbuf.st_mode))
         {
-            archiveDirectory(outfile, fullpath);
+            writeDirectorytoArchive(outfile, fullPath, metaDataOffset);
         }
 
-        // Otherwise it's a file and the same steps for reading the data from the file and writing to the archive file are in place as the main createArchive() function. 
+        // Otherwise it is a file: 
         else
         {
-            FILE *infile = fopen(fullpath, "rb");
-            if (infile == NULL)
-            {
-                printf("Could not open %s for reading\n", fullpath);
-                continue;
-            }
-            fprintf(outfile, "%s\n", fullpath); // Write the file path and a newline
-            char buffer[1024];
-            size_t bytes;
-            while ((bytes = fread(buffer, 1, sizeof(buffer), infile)) > 0)
-            {
-                fwrite(buffer, 1, bytes, outfile);
-            }
-            fclose(infile);
+            writeFiletoArchive(outfile, fullPath, metaDataOffset);
         }
     }
     closedir(dir);
@@ -148,167 +187,43 @@ void archiveDirectory(FILE *outfile, const char *path)
 // This function is invoked when the "-c" flag is executed on the command line to create an archive and store all the files/directories in it.
 void createArchive(const char *archiveFile, const char *fileOrDirectory)
 {
-    // Create the actual archive file
-    FILE *outfile = fopen(archiveFile, "wb"); //write-only and binary mode
-    if (outfile == NULL)
+    // Creating an archive file in write mode (binary) for writing data onto it
+    FILE *outfile = fopen(archiveFile, "wb");
+    if (!outfile)
     {
         perror("Failed to create archive file");
         exit(EXIT_FAILURE);
     }
 
-    // This structure is used to get information about the file/directory
+    // Initializing an initial offset between data and the metadata in the archive file (will be overwritten later when files are actually written)
+    long metaDataOffset = sizeof(long);                          
+    fwrite(&metaDataOffset, sizeof(metaDataOffset), 1, outfile); 
+
+    // Getting the entities information and reading if it's a directory or a regular file
     struct stat path_stat;
     stat(fileOrDirectory, &path_stat);
 
-    // Check to see if path is a directory then we can execute the following recusrive storage system for archiving directories: 
+    // If it's a directory, then we handle recursively:
     if (S_ISDIR(path_stat.st_mode))
     {
-        archiveDirectory(outfile, fileOrDirectory);
+        writeDirectoryToArchive(outfile, fileOrDirectory, &metaDataOffset);
     }
 
-    // Otherwise, we can simply open a file from this path (read binary mode)
+    // Otherwise it's a file and we can handle it directly
     else
     {
-        FILE *infile = fopen(fileOrDirectory, "rb");
-        if (infile == NULL)
-        {
-            printf("Could not open %s for reading\n", fileOrDirectory);
-            fclose(outfile);
-            exit(EXIT_FAILURE);
-        }
-
-        char buffer[1024];
-        size_t bytes;
-
-        // Reading in all data from the file in chunks of buffer (1024 bytes), then writing it to the archive file
-        while ((bytes = fread(buffer, 1, sizeof(buffer), infile)) > 0)
-        {
-            fwrite(buffer, 1, bytes, outfile);
-        }
-        fclose(infile);
+        writeFileToArchive(outfile, fileOrDirectory, &metaDataOffset);
     }
+
+    // Go back to the beginning inital bytes created at the beginning of the file and write the metadata offset there. 
+    fseek(outfile, 0, SEEK_SET);
+    fwrite(&metaDataOffset, sizeof(metaDataOffset), 1, outfile);
 
     fclose(outfile);
 }
 
 //================================================================ APPENDING ================================================================================
-// Helper function for appendToArchive() for directories to recursively append each file in it to the archive file
-void archiveDirectoryAppend(FILE *outfile, const char *path)
-{
-    // Opens up the directory 
-    DIR *dir = opendir(path);
-    if (dir == NULL)
-    {
-        perror("Failed to open directory");
-        exit(EXIT_FAILURE);
-    }
 
-    // While there are still entries in the directory we keep recursively reading
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL)
-    {
-        // Skip the first two entries of the directory table '.' and '..' 
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue; 
-
-
-        // Append the fullpath to each entry name
-        char fullpath[1024];
-        snprintf(fullpath, sizeof(fullpath), "%s/%s", path, entry->d_name);
-        
-        // If the entry is a directory then we recurse
-        struct stat entry_stat;
-        stat(fullpath, &entry_stat);
-
-        if (S_ISDIR(entry_stat.st_mode))
-        {
-            archiveDirectoryAppend(outfile, fullpath);
-        }
-
-        // Otherwise we open the file and write the file path and read the data onto the outfile
-        else
-        {
-            FILE *infile = fopen(fullpath, "rb");
-            if (infile == NULL)
-            {
-                printf("Could not open %s for reading\n", fullpath);
-                continue;
-            }
-
-            fprintf(outfile, "%s\n", fullpath); // Write the file path and a newline
-            char buffer[1024];
-            size_t bytes;
-
-            while ((bytes = fread(buffer, 1, sizeof(buffer), infile)) > 0)
-            {
-                fwrite(buffer, 1, bytes, outfile);
-            }
-            fclose(infile);
-        }
-    }
-    closedir(dir);
-}
-
-// This function is invoked when the "-a" flag is executed on the command line to append files and directories to the archive file
-void appendToArchive(const char *archiveFile, const char *fileOrDirectory)
-{
-    // First, we check if the archive file exists
-    struct stat buffer;
-    if (stat(archiveFile, &buffer) != 0)
-    {
-        if (errno == ENOENT)
-        {
-            // The archive file does not exist
-            printf("Error: Archive file does not exist. Cannot append to a non-existing archive.\n");
-            exit(EXIT_FAILURE);
-        }
-        else
-        {
-            // Other errors such as permissions issues
-            perror("Failed to access archive file");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    // We open the archive file in 'append' mode
-    FILE *outfile = fopen(archiveFile, "ab"); 
-    if (outfile == NULL)
-    {
-        perror("Failed to open archive file for appending");
-        exit(EXIT_FAILURE);
-    }
-
-    // We check if it's a directory, then we pass it to the archive directory function
-    struct stat path_stat;
-    stat(fileOrDirectory, &path_stat);
-    if (S_ISDIR(path_stat.st_mode))
-    {
-        archiveDirectoryAppend(outfile, fileOrDirectory);
-    }
-
-    // Otherwise we simply open the file and write it's path and data onto the archive file. 
-    else
-    {
-        FILE *infile = fopen(fileOrDirectory, "rb");
-        if (infile == NULL)
-        {
-            printf("Could not open %s for reading\n", fileOrDirectory);
-            fclose(outfile);
-            exit(EXIT_FAILURE);
-        }
-
-        fprintf(outfile, "%s\n", fileOrDirectory);
-        char buffer[1024];
-        size_t bytes;
-        while ((bytes = fread(buffer, 1, sizeof(buffer), infile)) > 0)
-        {
-            fwrite(buffer, 1, bytes, outfile);
-        }
-        fclose(infile);
-    }
-
-    fclose(outfile);
-}
 
 // Main Function
 int main(int argc, char *argv[]) 
