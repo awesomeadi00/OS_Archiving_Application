@@ -4,9 +4,11 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
-#include <unistd.h> 
+#include <unistd.h>
 #include <limits.h>
 #include <ctype.h>
+#include <pwd.h>
+#include <grp.h>
 
 // Dictionary Structure for a file entity's metadata
 #pragma pack(push, 1)
@@ -16,6 +18,9 @@ typedef struct
     long size;
     long offset;
     char name[256];
+    uid_t owner;
+    gid_t group;
+    mode_t rights;
 } ArchiveEntry;
 
 // Header of the archive which keeps track of the metadataOffset and the number of entries
@@ -135,7 +140,15 @@ void writeFileToArchive(FILE *archive, const char *filePath, const char *filePat
         return;
     }
 
-    // We get according information of the file and the archive (where the file will be writen
+    struct stat st;
+    if (stat(filePath, &st) != 0)
+    {
+        perror("Failed to get file status");
+        fclose(file);
+        return;
+    }
+
+    // We get according information of the file and the archive (where the file will be writen)
     long size = getFileSize(filePath);
     long offset = ftell(archive);
 
@@ -153,10 +166,9 @@ void writeFileToArchive(FILE *archive, const char *filePath, const char *filePat
     entry->size = size;
     entry->offset = offset;
     strcpy(entry->name, filePathfromRoot);
-
-    // // Debug print
-    // printf("Pre-Write Metadata: Name=%s, Type=%c, Offset=%ld, Size=%ld\n\n",
-    //        entry->name, entry->type, entry->offset, entry->size);
+    entry->owner = st.st_uid;
+    entry->group = st.st_gid;
+    entry->rights = st.st_mode;
 }
 
 // Recursive function to process directories
@@ -165,6 +177,14 @@ void processDirectory(FILE *archive, const char *inputPath, const char *director
     ArchiveEntry *dirEntry = &entries[*entryCount];
     strcpy(dirEntry->name, directoryPathFromRoot);
     dirEntry->type = 'D';
+
+    struct stat st;
+    if (stat(inputPath, &st) != 0)
+    {
+        perror("Failed to get directory status");
+        return;
+    }
+
     dirEntry->size = 0;                // Directory size can be 0 as it holds no "data" itself
     dirEntry->offset = ftell(archive); // Offset where directory data would be, not applicable here
     (*entryCount)++;                   // Increment entry count
@@ -187,7 +207,7 @@ void processDirectory(FILE *archive, const char *inputPath, const char *director
     {
         // We skip the first two entries which are '.' and '..'
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue; 
+            continue;
 
         // Build the full path of the current file or directory by appending it with this directory
         char fullPath[PATH_MAX];
@@ -197,7 +217,7 @@ void processDirectory(FILE *archive, const char *inputPath, const char *director
         char fullPathfromRoot[PATH_MAX];
         snprintf(fullPathfromRoot, sizeof(fullPath), "%s/%s", directoryPathFromRoot, entry->d_name);
 
-        struct stat path_stat;  
+        struct stat path_stat;
         stat(fullPath, &path_stat);
 
         // Check once more if it's a directory we will recurse
@@ -219,7 +239,6 @@ void processDirectory(FILE *archive, const char *inputPath, const char *director
 // Creates a directory if it doesn't exist - invoked from the extraction function
 void createDirectoryIfNotExists(const char *path)
 {
-    printf("Creating directory: %s\n", path);
     struct stat st = {0};
 
     // If this directory doesn't exist, then we will make it
@@ -244,14 +263,168 @@ void trimTrailingSpaces(char *str)
     {
         len--;
     }
-    str[len] = '\0'; 
+    str[len] = '\0';
+}
+
+// Function to check if the archive file exists
+void CheckIfArchiveExists(const char *archiveFile)
+{
+    struct stat buffer;
+    if (stat(archiveFile, &buffer) != 0)
+    {
+        fprintf(stderr, "Archive file '%s' does not exist in the Current Directory.\n", archiveFile);
+        exit(EXIT_FAILURE);
+    }
+}
+
+// Function to check if the input path file entities we want to archive even exists
+void CheckIfInputPathExists(const char *inputPath)
+{
+    struct stat buffer;
+    if (stat(inputPath, &buffer) != 0)
+    {
+        fprintf(stderr, "Input path '%s' does not exist in the File System.\n", inputPath);
+        exit(EXIT_FAILURE);
+    }
+}
+
+// Function to get file permissions as a string
+void getPermissionsString(mode_t mode, char *permStr)
+{
+    strcpy(permStr, "----------");
+
+    if (S_ISDIR(mode))
+        permStr[0] = 'd';
+    if (mode & S_IRUSR)
+        permStr[1] = 'r';
+    if (mode & S_IWUSR)
+        permStr[2] = 'w';
+    if (mode & S_IXUSR)
+        permStr[3] = 'x';
+    if (mode & S_IRGRP)
+        permStr[4] = 'r';
+    if (mode & S_IWGRP)
+        permStr[5] = 'w';
+    if (mode & S_IXGRP)
+        permStr[6] = 'x';
+    if (mode & S_IROTH)
+        permStr[7] = 'r';
+    if (mode & S_IWOTH)
+        permStr[8] = 'w';
+    if (mode & S_IXOTH)
+        permStr[9] = 'x';
+}
+
+// This is a helper function for the display archive functionality which deals with formatting and printing
+void DisplayHierarchy(ArchiveEntry *entries, int numEntries, int level, const char *parentPath)
+{
+    for (int i = 0; i < numEntries; i++)
+    {
+        ArchiveEntry entry = entries[i];
+
+        // Check if the entry is a direct child of the current parent path
+        if (strncmp(entry.name, parentPath, strlen(parentPath)) == 0)
+        {
+            // Find the next '/' character after the parent path to determine if it's a direct child
+            const char *remainingPath = entry.name + strlen(parentPath);
+            const char *slashPos = strchr(remainingPath, '/');
+
+            if ((slashPos == NULL) || (slashPos - remainingPath == strlen(remainingPath) - 1))
+            {
+                // Making this organized
+                if (level == 0)
+                {
+                    printf("\n");
+                }
+
+                // Print indentations based on the hierarchy level
+                for (int j = 0; j < level; j++)
+                {
+                    printf("    ");
+                }
+
+                // Print the entry name
+                printf("___%s\n", remainingPath);
+
+                // If it's a directory, recursively display its contents
+                if (entry.type == 'D')
+                {
+                    char subPath[256];
+                    snprintf(subPath, sizeof(subPath), "%s%s/", parentPath, remainingPath);
+                    DisplayHierarchy(entries, numEntries, level + 1, subPath);
+                }
+            }
+        }
+    }
+}
+
+// Another helper function for appending which ensures that each file entity has a unique name even after appending.
+void GenerateUniqueEntryName(ArchiveEntry *entries, int entryCount, char *name)
+{
+    int count = 1;
+    size_t len = strlen(name);
+
+    // Find the position of the last '.' in the filename to handle the extension
+    char *dotPos = strrchr(name, '.');
+    size_t baseLen = (dotPos) ? (dotPos - name) : len;
+
+    // Making some space for the number and potential extension change
+    char *newName = malloc(len + 10);
+    if (newName == NULL)
+    {
+        perror("Memory allocation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Check for existing entries with the same name
+    int unique = 0;
+    while (!unique)
+    {
+        unique = 1; // Assume the name is unique
+
+        // Check with every entry if the file we are appending is unique or not
+        for (int i = 0; i < entryCount; i++)
+        {
+            if (strcmp(entries[i].name, name) == 0)
+            {
+                unique = 0; // Name is not unique
+
+                if (dotPos)
+                {
+                    // If there's an extension, insert the count before the extension
+                    snprintf(newName, len + 10, "%.*s %d%s", (int)baseLen, name, count, dotPos);
+                }
+                else
+                {
+                    // If there's no extension, just append the count
+                    snprintf(newName, len + 10, "%s %d", name, count);
+                }
+
+                count++;
+                break;
+            }
+        }
+
+        if (unique)
+        {
+            break;
+        }
+        else
+        {
+            strcpy(name, newName);
+        }
+    }
+
+    free(newName);
 }
 
 //================================================================ CREATION ================================================================================
 // Function to initialize an archive
 void CreateArchive(const char *archiveFile, char *inputPath)
 {
-    // Open the archive file as writing binary mode 
+    CheckIfInputPathExists(inputPath);
+
+    // Open the archive file as writing binary mode
     FILE *archive = fopen(archiveFile, "wb+");
     if (!archive)
     {
@@ -264,22 +437,26 @@ void CreateArchive(const char *archiveFile, char *inputPath)
     fwrite(&header, sizeof(ArchiveHeader), 1, archive); // Reserve space for the header on the archive
 
     // For now we will just have a cap of 1000 entries, plan to make this dynamic later
-    ArchiveEntry entries[1000]; 
+    ArchiveEntry entries[1000];
     int entryCount = 0;
 
-    // Get information about the inputhPath provided
+    // Get information about the inputPath provided
     struct stat path_stat;
     stat(inputPath, &path_stat);
 
     // Extract only the last part of the path to get the root of this archive
     char *rootOfArchive = strrchr(inputPath, '/');
-    if (rootOfArchive) {
+    if (rootOfArchive)
+    {
         rootOfArchive++; // Skip the slash to get only the name or directory
     }
-    else {
+    else
+    {
         rootOfArchive = inputPath; // The path does not contain any slashes
     }
-    printf("Root of Archive: %s\n", rootOfArchive);
+
+    // Debug to check what the root of the archive is
+    // printf("Root of Archive: %s\n", rootOfArchive);
 
     // If it's a directory then we will process the directory into the archive
     if (S_ISDIR(path_stat.st_mode))
@@ -296,7 +473,7 @@ void CreateArchive(const char *archiveFile, char *inputPath)
 
     // Update all header metadata at the end of the archive
     header.metadataOffset = ftell(archive);
-    header.numEntries = entryCount; 
+    header.numEntries = entryCount;
 
     fseek(archive, 0, SEEK_END);
     // For each entry we will update their metadata into the metadata section of the archive
@@ -347,9 +524,118 @@ void CreateArchive(const char *archiveFile, char *inputPath)
     printf("Archive created successfully\n");
 }
 
+//================================================================ APPENDING ================================================================================
+// This function will help to append a file or directory into the archive
+void AppendToArchive(const char *archiveFile, char *inputPath)
+{
+    CheckIfArchiveExists(archiveFile);
+    CheckIfInputPathExists(inputPath);
+
+    // Open the archive file in read-write mode
+    FILE *archive = fopen(archiveFile, "rb+");
+    if (!archive)
+    {
+        perror("Failed to open archive file for appending");
+        exit(EXIT_FAILURE);
+    }
+
+    // Read the header information from the archive file
+    ArchiveHeader header;
+    if (fread(&header, sizeof(ArchiveHeader), 1, archive) != 1)
+    {
+        perror("Failed to read archive header");
+        fclose(archive);
+        exit(EXIT_FAILURE);
+    }
+
+    // Move to the metadata section
+    fseek(archive, header.metadataOffset, SEEK_SET);
+
+    // Read existing metadata entries
+    ArchiveEntry entries[1000];
+    if (fread(entries, sizeof(ArchiveEntry), header.numEntries, archive) != header.numEntries)
+    {
+        perror("Failed to read existing metadata entries");
+        fclose(archive);
+        exit(EXIT_FAILURE);
+    }
+
+    // Update entry count
+    int entryCount = header.numEntries;
+
+    // Debug check to see if all entries have been read properly
+    // for(int i=0; i <entryCount; i++) {
+    //     printf("Reading in:\nName=%s\n Type=%c\n Size=%ld\n Offset=%ld\n", entries[i].name, entries[i].type, entries[i].size, entries[i].offset);
+    // }
+
+    // Move to the end of the data section to start appending
+    fseek(archive, 0, SEEK_END);
+
+    // Get information about the inputPath provided
+    struct stat path_stat;
+    stat(inputPath, &path_stat);
+
+    // Extract only the last part of the path to get the root of this append
+    char *rootOfAppendingEntity = strrchr(inputPath, '/');
+    if (rootOfAppendingEntity)
+    {
+        rootOfAppendingEntity++; // Skip the slash to get only the name or directory
+    }
+    else
+    {
+        rootOfAppendingEntity = inputPath; // The path does not contain any slashes
+    }
+
+    // Ensure the new entry name is unique
+    char uniqueName[256];
+    strcpy(uniqueName, rootOfAppendingEntity);
+    GenerateUniqueEntryName(entries, entryCount, uniqueName);
+
+    // If it's a directory then we will process the directory into the archive
+    if (S_ISDIR(path_stat.st_mode))
+    {
+        processDirectory(archive, inputPath, uniqueName, entries, &entryCount);
+    }
+
+    // Otherwise we will simply call the function to write the file directly into the archive
+    else
+    {
+        writeFileToArchive(archive, inputPath, uniqueName, &entries[entryCount]);
+        entryCount++;
+    }
+
+    // Update all header metadata at the end of the archive
+    long newMetadataOffset = ftell(archive);
+    header.metadataOffset = newMetadataOffset;
+    header.numEntries = entryCount;
+
+    // Write the updated metadata entries
+    if (fwrite(entries, sizeof(ArchiveEntry), entryCount, archive) != entryCount)
+    {
+        perror("Failed to write updated metadata entries");
+        fclose(archive);
+        exit(EXIT_FAILURE);
+    }
+
+    // Go back to the beginning and update the header
+    rewind(archive);
+    if (fwrite(&header, sizeof(ArchiveHeader), 1, archive) != 1)
+    {
+        perror("Failed to update archive header");
+        fclose(archive);
+        exit(EXIT_FAILURE);
+    }
+
+    fclose(archive);
+    printf("Archive appended successfully\n");
+}
+
 //================================================================ EXTRACTION ================================================================================
+// This function helps with the extraction of the entire hierarchy into this current directory
 void ExtractArchive(const char *archiveFile)
 {
+    CheckIfArchiveExists(archiveFile);
+
     // Get the current working directory path
     char basePath[PATH_MAX];
     if (!getcwd(basePath, sizeof(basePath)))
@@ -378,13 +664,13 @@ void ExtractArchive(const char *archiveFile)
     }
 
     // Retrieve the metadata offset entry, set it as the start of it
-    long nextEntryOffset = header.metadataOffset; 
+    long nextEntryOffset = header.metadataOffset;
 
     // For each entry (each file entity within the archive), we will attempt to extract
     for (int i = 0; i < header.numEntries; i++)
-    {   
+    {
         // Move to the next metadata entry
-        fseek(archive, nextEntryOffset, SEEK_SET); 
+        fseek(archive, nextEntryOffset, SEEK_SET);
 
         ArchiveEntry entry;
         if (fread(&entry, sizeof(ArchiveEntry), 1, archive) != 1)
@@ -394,19 +680,26 @@ void ExtractArchive(const char *archiveFile)
         }
 
         // Update the position to the next metadata entry
-        nextEntryOffset = ftell(archive); 
+        nextEntryOffset = ftell(archive);
 
         // Append the entry to the current working directory path
         char fullCDPath[PATH_MAX];
-        snprintf(fullCDPath, sizeof(fullCDPath), "%s/%s", basePath, entry.name);
 
-        printf("\nProcessing Entry: %s\nType: %c\nOffset: %ld\nSize: %ld\n",
-               fullCDPath, entry.type, entry.offset, entry.size);
+        // Accounting for overflow in case the total full path exceeds the buffer size
+        snprintf(fullCDPath, sizeof(fullCDPath), "%s", basePath);
+        size_t remaining_size = sizeof(fullCDPath) - strlen(fullCDPath) - 1; // Minus 1 for the null terminator
+        strncat(fullCDPath, "/", remaining_size);
+        remaining_size = sizeof(fullCDPath) - strlen(fullCDPath) - 1; // Update remaining size
+        strncat(fullCDPath, entry.name, remaining_size);
 
+        // Debug to check if entries are valid
+        // printf("\nProcessing Entry: %s\nType: %c\nOffset: %ld\nSize: %ld\n",
+        //        fullCDPath, entry.type, entry.offset, entry.size);
 
         // Create a directory in this fullpath if it doesn't exist
-        if(entry.type == 'D') {
-            createDirectoryIfNotExists(fullCDPath); 
+        if (entry.type == 'D')
+        {
+            createDirectoryIfNotExists(fullCDPath);
         }
 
         // Extracting files
@@ -430,12 +723,123 @@ void ExtractArchive(const char *archiveFile)
             }
 
             fclose(outFile);
-            printf("Extracted: %s\n", fullCDPath);
         }
     }
 
     fclose(archive);
     printf("Extraction completed successfully\n");
+}
+
+//================================================================ METADATA ================================================================================
+// This function will print out all relevant metadata information regarding the file/directory
+void PrintMetaData(const char *archiveFile)
+{
+    CheckIfArchiveExists(archiveFile);
+
+    // Open the archive file in read mode
+    FILE *archive = fopen(archiveFile, "rb");
+    if (!archive)
+    {
+        perror("Failed to open archive file for reading");
+        exit(EXIT_FAILURE);
+    }
+
+    // Read the header information from the archive file
+    ArchiveHeader header;
+    if (fread(&header, sizeof(ArchiveHeader), 1, archive) != 1)
+    {
+        perror("Failed to read archive header");
+        fclose(archive);
+        return;
+    }
+
+    // Move to the metadata section
+    fseek(archive, header.metadataOffset, SEEK_SET);
+
+    // Read existing metadata entries
+    ArchiveEntry entries[1000]; // assuming the cap of 1000 entries
+    if (fread(entries, sizeof(ArchiveEntry), header.numEntries, archive) != header.numEntries)
+    {
+        perror("Failed to read existing metadata entries");
+        fclose(archive);
+        exit(EXIT_FAILURE);
+    }
+
+    // // Debug check to see if all entries have been read properly
+    // for(int i=0; i <header.numEntries; i++) {
+    //     printf("Reading in:\nName=%s\n Type=%c\n Size=%ld\n Offset=%ld\n", entries[i].name, entries[i].type, entries[i].size, entries[i].offset);
+    // }
+
+    printf("Metadata information for each File/Directory:\n");
+    printf("---------------------------------------------\n");
+    // Print metadata for each entry
+    for (int i = 0; i < header.numEntries; i++)
+    {
+        ArchiveEntry entry = entries[i];
+
+        // Get owner and group information
+        struct passwd *pwd = getpwuid(entry.owner);
+        struct group *grp = getgrgid(entry.group);
+
+        // Get permissions string
+        char permStr[11];
+        getPermissionsString(entry.rights, permStr);
+
+        // Print metadata information
+        printf("Name: %s\n", entry.name);
+        printf("Type: %c\n", entry.type);
+        printf("Owner: %s\n", pwd ? pwd->pw_name : "Unknown");
+        printf("Group: %s\n", grp ? grp->gr_name : "Unknown");
+        printf("Permissions: %s\n", permStr);
+        printf("Size: %ld bytes\n", entry.size);
+        printf("Offset: %ld\n", entry.offset);
+        printf("-------------------------\n");
+    }
+
+    fclose(archive);
+}
+
+//================================================================ DISPLAY ================================================================================
+// This function will display the hierarchy(-ies) within the archive file
+void DisplayArchive(const char *archiveFile)
+{
+    CheckIfArchiveExists(archiveFile);
+
+    // Open the archive file in read mode
+    FILE *archive = fopen(archiveFile, "rb");
+    if (!archive)
+    {
+        perror("Failed to open archive file for reading");
+        exit(EXIT_FAILURE);
+    }
+
+    // Read the header information from the archive file
+    ArchiveHeader header;
+    if (fread(&header, sizeof(ArchiveHeader), 1, archive) != 1)
+    {
+        perror("Failed to read archive header");
+        fclose(archive);
+        return;
+    }
+
+    // Move to the metadata section
+    fseek(archive, header.metadataOffset, SEEK_SET);
+
+    // Read existing metadata entries
+    ArchiveEntry entries[1000]; // assuming the cap of 1000 entries
+    if (fread(entries, sizeof(ArchiveEntry), header.numEntries, archive) != header.numEntries)
+    {
+        perror("Failed to read existing metadata entries");
+        fclose(archive);
+        exit(EXIT_FAILURE);
+    }
+
+    fclose(archive);
+
+    // Display the hierarchy
+    printf("Archived Hierarchy(-ies):\n");
+    printf("--------------------------------");
+    DisplayHierarchy(entries, header.numEntries, 0, "");
 }
 
 //================================================================ MAIN ================================================================================
@@ -454,6 +858,7 @@ int main(int argc, char *argv[])
     // Else if the flag is "-a" for append
     else if (strcmp(flag, "-a") == 0)
     {
+        AppendToArchive(archiveFile, file_directory);
     }
 
     // Else if the flag is "-x" for extract
@@ -465,11 +870,13 @@ int main(int argc, char *argv[])
     // Else if the flag is "-m" for metadata
     else if (strcmp(flag, "-m") == 0)
     {
+        PrintMetaData(archiveFile);
     }
 
     // Else if the flag is "-p" for display
     else if (strcmp(flag, "-p") == 0)
     {
+        DisplayArchive(archiveFile);
     }
 
     return (EXIT_SUCCESS);
